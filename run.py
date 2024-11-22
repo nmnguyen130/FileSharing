@@ -3,7 +3,8 @@ import time
 
 MODULES = {
     '1': 'src.main',
-    '2': 'src.file_sharing.client_gui',
+    '2': 'src.gui.client_gui',
+    '3': 'src.file_sharing.file_client',
 }
 
 def print_modules():
