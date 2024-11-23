@@ -76,13 +76,6 @@ class FileServer:
             return
 
         user_id, directory_name = int(args[0]), args[1]
-        
-        # Kiểm tra xem thư mục đã tồn tại chưa
-        dir_path = os.path.join(self.ROOT_DIR, str(user_id), directory_name)
-        if os.path.exists(dir_path):
-            client_socket.send(f"ERROR: Directory '{directory_name}' already exists.".encode())
-            return
-        os.makedirs(dir_path)
 
         self.db_handler.add_directory(user_id, directory_name)
         client_socket.send(f"Directory '{directory_name}' created.".encode())

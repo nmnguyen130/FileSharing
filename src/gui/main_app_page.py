@@ -1,6 +1,6 @@
 import os
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 
 class MainAppPage(tk.Frame):
     """Main Application Page."""
@@ -39,6 +39,13 @@ class MainAppPage(tk.Frame):
         tk.Label(info_frame, text="Client Info:", font=("Arial", 12, "bold"), bg="#f8f9fa").pack(anchor="w", padx=5, pady=5)
         tk.Label(info_frame, text=f"IP Address: {self.file_client.local_ip}", bg="#f8f9fa").pack(anchor="w", padx=15)
         tk.Label(info_frame, text=f"Connected to: {self.file_client.server_ip}", bg="#f8f9fa").pack(anchor="w", padx=15)
+
+        create_folder_button = ttk.Button(
+            info_frame,
+            text="Create Folder",
+            command=self.create_folder
+        )
+        create_folder_button.pack(anchor="e", padx=10, pady=5)
 
         # Directory Explorer Section
         explorer_frame = tk.Frame(self, bg="#f8f9fa")
@@ -86,6 +93,23 @@ class MainAppPage(tk.Frame):
         # Load initial directory
         self.refresh_directory()
 
+    def create_folder(self):
+        """Create a new folder in the current directory."""
+        folder_name = simpledialog.askstring("Create Folder", "Enter folder name:")
+        if folder_name:
+            try:
+                # Use the file_client's create_directory method to create the folder
+                success = self.file_client.create_directory(folder_name)
+                if success:
+                    messagebox.showinfo("Success", f"Folder '{folder_name}' created!")
+                    self.refresh_directory()  # Refresh the directory to show the new folder
+                else:
+                    messagebox.showerror("Error", "Failed to create folder.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error creating folder: {e}")
+        else:
+            messagebox.showwarning("Cancelled", "Folder creation cancelled.")
+
     def refresh_directory(self):
         """Fetch and display the list of directories and files shared by users."""
         self.treeview.delete(*self.treeview.get_children())  # Clear existing items
@@ -107,7 +131,7 @@ class MainAppPage(tk.Frame):
                         directory_node = self.treeview.insert(
                             user_node,
                             "end",
-                            directory['name'],  # Use directory name as the item ID for simplicity
+                            f"{user_id}_{directory['name']}",  # Use directory name as the item ID for simplicity
                             text=directory['name'],  # Display the name in the tree view
                             values=(user['ip'], user['port'], directory['path']),  # Store the hidden path in 'values'
                             tags=("directory",)
@@ -159,6 +183,14 @@ class MainAppPage(tk.Frame):
             file_name = os.path.basename(file_path)
             download_directory = f"D:/shared_directories/{self.file_client.user_id}/download"
             download_path = os.path.join(download_directory, file_name)
+
+            peers = self.file_client.search_file_across_peers(file_name)
+
+            if len(peers) > 1:
+                response = messagebox.askyesno("BitTorrent Download", f"File '{file_name}' found on {len(peers)} peers. Do you want to download using BitTorrent?")
+                if response:
+                    self.file_client.download_file_bittorrent(file_name, peers)
+                    return
 
             self.file_client.download_file(target_ip, target_port, file_path)
 

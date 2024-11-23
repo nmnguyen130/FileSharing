@@ -1,3 +1,4 @@
+from asyncio import Queue
 import os
 import json
 import socket
@@ -8,6 +9,7 @@ class FileClient:
     SERVER_IP = '127.0.0.1'
     SERVER_PORT = 5001
     BUFFER_SIZE = 1024
+    ROOT_DIR = "D:/shared_directories"
 
     def __init__(self, assigned_ip):
         self.server_ip = self.SERVER_IP
@@ -79,6 +81,25 @@ class FileClient:
                 elif command.startswith("LIST_FILE"):
                     _, directory_path = command.split(maxsplit=1)
                     self.list_files_in_directory(directory_path, conn)
+                elif command.startswith("GET_FILE_SIZE"):
+                    _, file_path = command.split(maxsplit=1)
+                    self.get_size(file_path, conn)
+                elif command.startswith("DOWNLOAD_CHUNK"):
+                    _, file_path, start, end = command.split()
+                    start, end = int(start), int(end)
+                    if os.path.exists(file_path):
+                        with open(file_path, "rb") as f:
+                            f.seek(start)
+                            while start <= end:
+                                chunk = f.read(min(self.BUFFER_SIZE, end - start + 1))
+                                if not chunk:
+                                    break
+                                conn.sendall(chunk)
+                                start += len(chunk)
+                                print(start)
+                        conn.sendall(b"END_OF_CHUNK")
+                    else:
+                        conn.sendall(b"ERROR: File not found")
                 else:
                     print(f"Unknown command: {command}")
 
@@ -92,15 +113,22 @@ class FileClient:
             try:
                 files = [{
                     "name": entry,
-                    "path": os.path.normpath(os.path.join(directory_path, entry))
+                    "path": os.path.join(directory_path, entry)
                 } for entry in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, entry))]
-
+                print(files)
                 self.send_data_in_chunks(json.dumps(files), conn)
                 conn.sendall(b"END_OF_LIST")
             except Exception as e:
                 print(f"Error getting list of files: {e}")
         else:
             print(f"Invalid directory: {directory_path}")
+
+    def get_size(self, file_path, conn):
+        if os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+            conn.sendall(str(file_size).encode())
+        else:
+            conn.sendall(b"ERROR: File not found")
 
     def register(self, username, password):
         self.send_to_server(f"REGISTER {username} {password}")
@@ -118,7 +146,15 @@ class FileClient:
             return False
 
     def create_directory(self, directory_name):
+        # Kiểm tra xem thư mục đã tồn tại chưa
+        dir_path = os.path.join(self.ROOT_DIR, str(self.user_id), directory_name)
+        if os.path.exists(dir_path):
+            print(f"ERROR: Directory '{directory_name}' already exists.")
+            return
+        os.makedirs(dir_path)
+
         self.send_to_server(f"CREATE_DIR {self.user_id} {directory_name}")
+        return True
 
     def list_directories(self, user_id):
         self.send_to_server(f"LIST_DIRS {user_id}")
@@ -199,6 +235,98 @@ class FileClient:
                         file.write(data)
         except Exception as e:
             print(f"Error downloading file: {e}")
+
+    def search_file_across_peers(self, file_name):
+        """Search for a file across all peers."""
+        peers_with_file = []
+        for user in self.get_active_directories():
+            user_ip = user["ip"]
+            user_port = user["port"]
+            directories = user["directories"]
+
+            for directory in directories:
+                files = self.list_file_in_directory(user_ip, user_port, directory["path"])
+                for file in files:
+                    if file["name"] == file_name:
+                        peers_with_file.append({
+                            "ip": user_ip,
+                            "port": user_port,
+                            "path": file["path"]
+                        })
+        return peers_with_file
+    
+    def get_file_size(self, peer, file_path):
+        """Request file size from a peer."""
+        try:
+            with socket.create_connection((peer["ip"], peer["port"])) as peer_socket:
+                command = f"GET_FILE_SIZE {file_path}"
+                peer_socket.sendall(command.encode())
+                size = peer_socket.recv(1024).decode()
+                return int(size)
+        except Exception as e:
+            print(f"Error retrieving file size from {peer['ip']}:{peer['port']}: {e}")
+            return None
+
+    def download_file_bittorrent(self, file_name, peers):
+        """Download file from multiple peers without knowing file size."""
+        chunk_size = 1024 * 1024  # 1MB
+        download_directory = f"D:/shared_directories/{self.user_id}/download"
+        os.makedirs(download_directory, exist_ok=True)
+        download_path = os.path.join(download_directory, file_name)
+
+        # Get file size from one of the peers
+        file_size = self.get_file_size(peers[0], peers[0]["path"])
+        if not file_size:
+            print("Failed to retrieve file size. Aborting.")
+            return
+        
+        # Prepare chunk download queue
+        num_chunks = (file_size + chunk_size - 1) // chunk_size
+        file_chunks = {}
+        chunk_lock = threading.Lock()
+
+        def worker(peer, chunk_id, chunk_start, chunk_end):
+            try:
+                with socket.create_connection((peer["ip"], peer["port"])) as peer_socket:
+                    command = f"DOWNLOAD_CHUNK {peer['path']} {chunk_start} {chunk_end}"
+                    peer_socket.sendall(command.encode())
+
+                    data = b""
+                    while True:
+                        packet = peer_socket.recv(self.BUFFER_SIZE)
+                        if packet == b"END_OF_CHUNK":
+                            break
+                        data += packet
+
+                    with chunk_lock:
+                        file_chunks[chunk_id] = data
+                        print(f"Đã tải chunk {chunk_id} từ {peer['ip']}:{peer['port']}")
+            except Exception as e:
+                print(f"Lỗi khi tải chunk {chunk_id} từ {peer['ip']}:{peer['port']}: {e}")
+
+        # Start threads for each peer
+        threads = []
+        for chunk_id in range(num_chunks):
+            chunk_start = chunk_id * chunk_size
+            chunk_end = min((chunk_id + 1) * chunk_size - 1, file_size - 1)
+
+            # Lấy peer để tải chunk này
+            peer = peers[chunk_id % len(peers)]  # Sử dụng vòng lặp qua các peers
+
+            # Tạo luồng worker cho mỗi chunk
+            thread = threading.Thread(target=worker, args=(peer, chunk_id, chunk_start, chunk_end))
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+
+        # Combine chunks
+        with open(download_path, "wb") as output_file:
+            for chunk_id in sorted(file_chunks):
+                output_file.write(file_chunks[chunk_id])
+
+        print(f"File '{file_name}' downloaded successfully using BitTorrent to '{download_path}'.")
 
     def send_data_in_chunks(self, data, conn):
         while data:
